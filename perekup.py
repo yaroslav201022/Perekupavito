@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
 # ================== ТОКЕН ==================
-BOT_TOKEN = "8879391155:AAE10A4-uCQMRboGPSJSKze19V2-FXKe77I"
+BOT_TOKEN = "8879391155:AAFy2q-8kMCxfEnl_1D6I1AqP5Ug9VfP73w"
 
 # ================== ЛОГИ ==================
 logging.basicConfig(level=logging.INFO)
@@ -174,7 +174,7 @@ def format_analysis(wb_data: dict, avito_data: dict) -> str:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "🚀 *ResellBrain — Оценщик перепродажи*\n\n"
+        "🚀 *ProfitRessel — Оценщик перепродажи*\n\n"
         "Скинь ссылку на товар с Wildberries, и я покажу:\n"
         "• Цену на WB\n"
         "• Среднюю цену на Авито\n"
