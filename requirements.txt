@@ -1,0 +1,4 @@
+aiogram==3.2.0
+httpx
+beautifulsoup4
+fake-useragent
