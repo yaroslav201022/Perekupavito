@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
 # ================== НАСТРОЙКИ ==================
-BOT_TOKEN = "8879391155:AAGh_JiRhw7IbF6cT7lwIInZV9-YGGwAmХ0"
+BOT_TOKEN = "8879391155:AAE10A4-uCQMRboGPSJSKze19V2-FXKe77I"
 
 # ================== ЛОГИ ==================
 logging.basicConfig(level=logging.INFO)
