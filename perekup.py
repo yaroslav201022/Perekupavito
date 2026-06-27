@@ -26,34 +26,74 @@ async def parse_wb(url: str) -> dict:
         return {"error": "Не удалось найти артикул в ссылке"}
 
     article = article_match.group(1)
-    api_url = f"https://card.wb.ru/cards/v2/detail?nm={article}"
-
+    
+    api_urls = [
+        f"https://card.wb.ru/cards/v2/detail?nm={article}",
+        f"https://card.wb.ru/cards/v1/detail?nm={article}",
+        f"https://basket-01.wb.ru/vol{article[:4]}/part{article[:6]}/{article}/info/ru/card.json",
+    ]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    
     async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(api_url, timeout=15)
-            data = resp.json()
-            products = data.get("data", {}).get("products", [])
-
-            if not products:
-                return {"error": "Товар не найден на Wildberries"}
-
-            product = products[0]
-            price_full = product.get("salePriceU", 0) / 100
-            price_basic = product.get("basicPriceU", 0) / 100
-            rating = product.get("reviewRating", 0)
-            reviews = product.get("feedbacks", 0)
-            name = product.get("name", "Без названия")
-            brand = product.get("brand", "")
-
-            return {
-                "name": f"{brand} {name}".strip(),
-                "price": price_full if price_full > 0 else price_basic,
-                "rating": rating,
-                "reviews": reviews,
-                "article": article
-            }
-        except Exception as e:
-            return {"error": f"Ошибка WB API: {str(e)}"}
+        for api_url in api_urls:
+            try:
+                resp = await client.get(api_url, headers=headers, timeout=15)
+                
+                if resp.status_code != 200:
+                    continue
+                
+                data = resp.json()
+                
+                if "data" in data and "products" in data.get("data", {}):
+                    products = data["data"]["products"]
+                    if not products:
+                        continue
+                    product = products[0]
+                    
+                    price_full = product.get("salePriceU", 0) / 100
+                    price_basic = product.get("basicPriceU", 0) / 100
+                    rating = product.get("reviewRating", 0)
+                    reviews = product.get("feedbacks", 0)
+                    name = product.get("name", "Без названия")
+                    brand = product.get("brand", "")
+                    
+                    return {
+                        "name": f"{brand} {name}".strip(),
+                        "price": price_full if price_full > 0 else price_basic,
+                        "rating": rating,
+                        "reviews": reviews,
+                        "article": article
+                    }
+                
+                if "imt_name" in data:
+                    product = data
+                    price_full = product.get("salePriceU", 0) / 100
+                    if price_full == 0:
+                        sizes = product.get("sizes", [])
+                        if sizes:
+                            price_full = sizes[0].get("price", {}).get("total", 0) / 100
+                    
+                    rating = product.get("reviewRating", 0)
+                    reviews = product.get("feedbacks", 0)
+                    name = product.get("imt_name", "Без названия")
+                    brand = product.get("brand", "")
+                    
+                    return {
+                        "name": f"{brand} {name}".strip(),
+                        "price": price_full,
+                        "rating": rating,
+                        "reviews": reviews,
+                        "article": article
+                    }
+                    
+            except Exception:
+                continue
+        
+        return {"error": "Товар не найден на Wildberries. Проверь артикул или ссылку."}
 
 # ================== ПАРСЕР АВИТО ==================
 async def parse_avito(query: str) -> dict:
