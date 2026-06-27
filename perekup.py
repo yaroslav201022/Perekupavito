@@ -21,79 +21,123 @@ dp = Dispatcher()
 
 # ================== ПАРСЕР WILDBERRIES ==================
 async def parse_wb(url: str) -> dict:
-    article_match = re.search(r'(\d{7,12})', url)
+    """Парсит товар Wildberries через HTML страницы"""
+    article_match = re.search(r'(\d{7,15})', url)
     if not article_match:
         return {"error": "Не удалось найти артикул в ссылке"}
 
     article = article_match.group(1)
+    product_url = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
     
-    api_urls = [
-        f"https://card.wb.ru/cards/v2/detail?nm={article}",
-        f"https://card.wb.ru/cards/v1/detail?nm={article}",
-        f"https://basket-01.wb.ru/vol{article[:4]}/part{article[:6]}/{article}/info/ru/card.json",
-    ]
-    
+    ua = UserAgent()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
+        "User-Agent": ua.random,
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Referer": "https://www.wildberries.ru/",
     }
-    
-    async with httpx.AsyncClient() as client:
-        for api_url in api_urls:
-            try:
-                resp = await client.get(api_url, headers=headers, timeout=15)
-                
-                if resp.status_code != 200:
-                    continue
-                
-                data = resp.json()
-                
-                if "data" in data and "products" in data.get("data", {}):
-                    products = data["data"]["products"]
-                    if not products:
-                        continue
-                    product = products[0]
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        try:
+            resp = await client.get(product_url, headers=headers, timeout=20)
+            
+            if resp.status_code != 200:
+                return {"error": f"WB вернул статус {resp.status_code}"}
+
+            html = resp.text
+            
+            # Ищем JSON с данными товара в HTML
+            # Вариант 1: window.__INITIAL_STATE__
+            state_match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', html, re.DOTALL)
+            if state_match:
+                import json
+                try:
+                    state = json.loads(state_match.group(1))
+                    product = state.get("product", {}).get("productCard", {}).get("data", {})
                     
-                    price_full = product.get("salePriceU", 0) / 100
-                    price_basic = product.get("basicPriceU", 0) / 100
-                    rating = product.get("reviewRating", 0)
-                    reviews = product.get("feedbacks", 0)
-                    name = product.get("name", "Без названия")
-                    brand = product.get("brand", "")
-                    
-                    return {
-                        "name": f"{brand} {name}".strip(),
-                        "price": price_full if price_full > 0 else price_basic,
-                        "rating": rating,
-                        "reviews": reviews,
-                        "article": article
-                    }
-                
-                if "imt_name" in data:
-                    product = data
-                    price_full = product.get("salePriceU", 0) / 100
-                    if price_full == 0:
-                        sizes = product.get("sizes", [])
-                        if sizes:
-                            price_full = sizes[0].get("price", {}).get("total", 0) / 100
-                    
-                    rating = product.get("reviewRating", 0)
-                    reviews = product.get("feedbacks", 0)
-                    name = product.get("imt_name", "Без названия")
-                    brand = product.get("brand", "")
-                    
-                    return {
-                        "name": f"{brand} {name}".strip(),
-                        "price": price_full,
-                        "rating": rating,
-                        "reviews": reviews,
-                        "article": article
-                    }
-                    
-            except Exception:
-                continue
-        
-        return {"error": "Товар не найден на Wildberries. Проверь артикул или ссылку."}
+                    if product:
+                        name = product.get("goodsName") or product.get("name", "Без названия")
+                        brand = product.get("brand", "")
+                        price = product.get("salePriceU", product.get("priceU", 0)) / 100
+                        rating = product.get("reviewRating", 0)
+                        reviews = product.get("feedbacks", 0)
+                        
+                        return {
+                            "name": f"{brand} {name}".strip(),
+                            "price": price,
+                            "rating": rating,
+                            "reviews": reviews,
+                            "article": article
+                        }
+                except:
+                    pass
+            
+            # Вариант 2: SSG-данные
+            ssg_match = re.search(r'<script id="ssr-data">(.*?)</script>', html, re.DOTALL)
+            if ssg_match:
+                import json
+                try:
+                    data = json.loads(ssg_match.group(1))
+                    # Ищем в разных местах
+                    pass
+                except:
+                    pass
+            
+            # Вариант 3: Парсим HTML напрямую
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Название
+            name_tag = soup.find("h1")
+            name = name_tag.get_text(strip=True) if name_tag else "Без названия"
+            
+            # Бренд
+            brand_tag = soup.find("span", {"data-link": re.compile(r"brand")})
+            brand = brand_tag.get_text(strip=True) if brand_tag else ""
+            
+            # Цена
+            price_tag = soup.find("ins", class_="price-block__final-price")
+            if not price_tag:
+                price_tag = soup.find("span", class_=re.compile(r"price"))
+            
+            price = 0
+            if price_tag:
+                price_text = price_tag.get_text(strip=True).replace("\xa0", "").replace(" ", "")
+                price_match = re.search(r'(\d+)', price_text)
+                if price_match:
+                    price = int(price_match.group(1))
+            
+            # Рейтинг и отзывы
+            rating_tag = soup.find("span", {"data-link": re.compile(r"rating")})
+            rating = 0
+            reviews = 0
+            if rating_tag:
+                rating_text = rating_tag.get_text(strip=True)
+                rating_match = re.search(r'([\d.]+)', rating_text)
+                if rating_match:
+                    rating = float(rating_match.group(1))
+            
+            reviews_tag = soup.find("span", class_=re.compile(r"count"))
+            if not reviews_tag:
+                reviews_tag = soup.find("span", string=re.compile(r"отзыв"))
+            if reviews_tag:
+                rev_text = reviews_tag.get_text(strip=True)
+                rev_match = re.search(r'(\d+)', rev_text)
+                if rev_match:
+                    reviews = int(rev_match.group(1))
+            
+            if price == 0:
+                return {"error": "Не удалось найти цену. Возможно, товар недоступен."}
+            
+            return {
+                "name": f"{brand} {name}".strip(),
+                "price": price,
+                "rating": rating,
+                "reviews": reviews,
+                "article": article
+            }
+            
+        except Exception as e:
+            return {"error": f"Ошибка парсинга WB: {str(e)}"}
 
 # ================== ПАРСЕР АВИТО ==================
 async def parse_avito(query: str) -> dict:
