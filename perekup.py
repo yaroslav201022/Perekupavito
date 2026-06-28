@@ -1,4 +1,18 @@
-(level=logging.INFO)
+import asyncio
+import logging
+import re
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import Message
+import httpx
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+
+# ================== ТОКЕН ==================
+BOT_TOKEN = "8879391155:AAFy2q-8kMCxfEnl_1D6I1AqP5Ug9VfP73w"
+
+# ================== ЛОГИ ==================
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ================== ИНИЦИАЛИЗАЦИЯ ==================
@@ -30,10 +44,10 @@ async def parse_avito_ad(url: str) -> dict:
             if not title_tag:
                 title_tag = soup.find("title")
             title = title_tag.get_text(strip=True) if title_tag else "Без названия"
-            # Убираем "купить", "в Москве" и прочий мусор из title
+            # Чистим
             title = re.sub(r'купить\s+|в\s+\S+\s*|цена\s*|недорого\s*|бу\s*|нов(ая|ый|ое)\s*', '', title, flags=re.IGNORECASE).strip()
 
-            # Цена (meta itemprop)
+            # Цена
             price_tag = soup.find("meta", itemprop="price")
             price = 0
             if price_tag:
@@ -41,7 +55,6 @@ async def parse_avito_ad(url: str) -> dict:
                 if content:
                     price = float(content)
 
-            # Fallback: span с ценой
             if price == 0:
                 price_span = soup.find("span", {"data-marker": "item-view/item-price"})
                 if price_span:
@@ -54,22 +67,18 @@ async def parse_avito_ad(url: str) -> dict:
                         except:
                             pass
 
-            # Город — много вариантов
+            # Город
             city = "Не указан"
-            city_selectors = [
-                ("span", {"data-marker": "item-view/item-address"}),
-                ("span", {"class": re.compile(r"address")}),
-                ("a", {"data-marker": "item-view/breadcrumbs"}),
-                ("meta", {"itemprop": "addressLocality"}),
-            ]
-            for tag_name, attrs in city_selectors:
-                city_tag = soup.find(tag_name, attrs)
-                if city_tag:
-                    if tag_name == "meta":
-                        city = city_tag.get("content", "Не указан")
-                    else:
-                        city = city_tag.get_text(strip=True)
-                    break
+            city_tag = soup.find("span", {"data-marker": "item-view/item-address"})
+            if not city_tag:
+                city_tag = soup.find("span", class_=re.compile(r"address"))
+            if not city_tag:
+                city_tag = soup.find("meta", itemprop="addressLocality")
+            if city_tag:
+                if city_tag.name == "meta":
+                    city = city_tag.get("content", "Не указан")
+                else:
+                    city = city_tag.get_text(strip=True)
 
             # Категория
             breadcrumbs = soup.find_all("a", {"data-marker": "item-view/breadcrumbs"})
@@ -77,24 +86,30 @@ async def parse_avito_ad(url: str) -> dict:
 
             # Просмотры
             views = 0
-            views_selectors = [
-                ("span", {"data-marker": "item-view/total-views"}),
-                ("span", string=re.compile(r"просмотр|view", re.IGNORECASE)),
-                ("span", {"class": re.compile(r"views")}),
-            ]
-            for tag_name, attrs in views_selectors:
-                views_tag = soup.find(tag_name, attrs)
-                if views_tag:
-                    views_text = views_tag.get_text(strip=True) if tag_name != "meta" else views_tag.get("content", "")
-                    views_match = re.search(r'(\d[\d\s]*)', views_text)
-                    if views_match:
-                        views = int(views_match.group(1).replace(" ", ""))
+            views_tag = soup.find("span", {"data-marker": "item-view/total-views"})
+            if not views_tag:
+                # Ищем любой span с текстом "просмотр"
+                all_spans = soup.find_all("span")
+                for span in all_spans:
+                    text = span.get_text(strip=True)
+                    if re.search(r'просмотр|view', text, re.IGNORECASE):
+                        views_tag = span
                         break
+            if views_tag:
+                views_text = views_tag.get_text(strip=True)
+                views_match = re.search(r'(\d[\d\s]*)', views_text)
+                if views_match:
+                    views = int(views_match.group(1).replace(" ", ""))
 
             # Дата
             date_tag = soup.find("span", {"data-marker": "item-view/item-date"})
             if not date_tag:
-                date_tag = soup.find("span", string=re.compile(r'сегодня|вчера|день|час|мин|\d{1,2}\s+\w+', re.IGNORECASE))
+                all_spans = soup.find_all("span")
+                for span in all_spans:
+                    text = span.get_text(strip=True)
+                    if re.search(r'сегодня|вчера|день|час|мин|\d{1,2}\s+\w+', text, re.IGNORECASE):
+                        date_tag = span
+                        break
             date_published = date_tag.get_text(strip=True) if date_tag else "Не указана"
 
             return {
@@ -118,15 +133,13 @@ async def search_similar_avito(title: str) -> dict:
         "Accept-Language": "ru-RU,ru;q=0.8",
     }
 
-    # Берём 3-5 ключевых слов без спецсимволов
     clean_title = re.sub(r'[^\w\s]', '', title)
     words = clean_title.split()
-    # Убираем короткие слова и мусор
-    keywords = [w for w in words if len(w) > 2 and w.lower() not in ['sim', 'esim', 'гб', 'гб,', 'pro', 'max', 'для', 'для', 'для']]
+    keywords = [w for w in words if len(w) > 2 and w.lower() not in ['sim', 'esim', 'гб', 'pro', 'max']]
     if not keywords:
         keywords = words[:3]
     short_query = " ".join(keywords[:4])
-    
+
     search_url = f"https://www.avito.ru/all?q={short_query}"
     logger.info(f"Ищем на Авито: {short_query}")
 
@@ -138,10 +151,10 @@ async def search_similar_avito(title: str) -> dict:
                 return {"error": f"Авито ответил {resp.status_code}", "prices": [], "avg": 0, "median": 0, "count": 0}
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            
+
             prices = []
-            
-            # Способ 1: meta itemprop="price"
+
+            # Способ 1: meta itemprop
             price_items = soup.find_all("meta", itemprop="price")
             for item in price_items:
                 content = item.get("content")
@@ -153,7 +166,7 @@ async def search_similar_avito(title: str) -> dict:
                     except:
                         continue
 
-            # Способ 2: span с data-marker="item-price"
+            # Способ 2: span с маркером цены
             if not prices:
                 price_blocks = soup.find_all("span", {"data-marker": re.compile(r"item-price")})
                 for block in price_blocks:
@@ -186,11 +199,10 @@ async def search_similar_avito(title: str) -> dict:
             if not prices:
                 return {"error": "Не удалось найти похожие товары на Авито", "prices": [], "avg": 0, "median": 0, "count": 0}
 
-            # Фильтруем выбросы
             sorted_prices = sorted(prices)
             median = sorted_prices[len(sorted_prices) // 2]
             filtered = [p for p in prices if 0.3 * median < p < 3 * median]
-            
+
             if filtered:
                 sorted_filtered = sorted(filtered)
                 avg = sum(filtered) / len(filtered)
