@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================== ПАРСЕР АВИТО (ОДНО ОБЪЯВЛЕНИЕ) ==================
+# ================== ПАРСЕР ОДНОГО ОБЪЯВЛЕНИЯ ==================
 async def parse_avito_ad(url: str) -> dict:
-    """Парсит одно объявление Авито по ссылке"""
     ua = UserAgent()
     headers = {
         "User-Agent": ua.random,
@@ -42,9 +41,13 @@ async def parse_avito_ad(url: str) -> dict:
             title_tag = soup.find("h1", {"data-marker": "item-view/title-info"})
             if not title_tag:
                 title_tag = soup.find("h1")
+            if not title_tag:
+                title_tag = soup.find("title")
             title = title_tag.get_text(strip=True) if title_tag else "Без названия"
+            # Убираем "купить", "в Москве" и прочий мусор из title
+            title = re.sub(r'купить\s+|в\s+\S+\s*|цена\s*|недорого\s*|бу\s*|нов(ая|ый|ое)\s*', '', title, flags=re.IGNORECASE).strip()
 
-            # Цена
+            # Цена (meta itemprop)
             price_tag = soup.find("meta", itemprop="price")
             price = 0
             if price_tag:
@@ -52,7 +55,7 @@ async def parse_avito_ad(url: str) -> dict:
                 if content:
                     price = float(content)
 
-            # Fallback: ищем цену в спанах
+            # Fallback: span с ценой
             if price == 0:
                 price_span = soup.find("span", {"data-marker": "item-view/item-price"})
                 if price_span:
@@ -60,27 +63,52 @@ async def parse_avito_ad(url: str) -> dict:
                     nums = re.findall(r'[\d\s]+', text)
                     if nums:
                         num = nums[0].replace(" ", "").replace("\xa0", "")
-                        price = float(num)
+                        try:
+                            price = float(num)
+                        except:
+                            pass
 
-            # Город
-            city_tag = soup.find("span", {"data-marker": "item-view/item-address"})
-            city = city_tag.get_text(strip=True) if city_tag else "Не указан"
+            # Город — много вариантов
+            city = "Не указан"
+            city_selectors = [
+                ("span", {"data-marker": "item-view/item-address"}),
+                ("span", {"class": re.compile(r"address")}),
+                ("a", {"data-marker": "item-view/breadcrumbs"}),
+                ("meta", {"itemprop": "addressLocality"}),
+            ]
+            for tag_name, attrs in city_selectors:
+                city_tag = soup.find(tag_name, attrs)
+                if city_tag:
+                    if tag_name == "meta":
+                        city = city_tag.get("content", "Не указан")
+                    else:
+                        city = city_tag.get_text(strip=True)
+                    break
 
-            # Категория (хлебные крошки)
+            # Категория
             breadcrumbs = soup.find_all("a", {"data-marker": "item-view/breadcrumbs"})
             category = " > ".join([b.get_text(strip=True) for b in breadcrumbs]) if breadcrumbs else "Не указана"
 
-            # Количество просмотров
+            # Просмотры
             views = 0
-            views_tag = soup.find("span", {"data-marker": "item-view/total-views"})
-            if views_tag:
-                views_text = views_tag.get_text(strip=True)
-                views_match = re.search(r'(\d+)', views_text)
-                if views_match:
-                    views = int(views_match.group(1))
+            views_selectors = [
+                ("span", {"data-marker": "item-view/total-views"}),
+                ("span", string=re.compile(r"просмотр|view", re.IGNORECASE)),
+                ("span", {"class": re.compile(r"views")}),
+            ]
+            for tag_name, attrs in views_selectors:
+                views_tag = soup.find(tag_name, attrs)
+                if views_tag:
+                    views_text = views_tag.get_text(strip=True) if tag_name != "meta" else views_tag.get("content", "")
+                    views_match = re.search(r'(\d[\d\s]*)', views_text)
+                    if views_match:
+                        views = int(views_match.group(1).replace(" ", ""))
+                        break
 
-            # Дата публикации
+            # Дата
             date_tag = soup.find("span", {"data-marker": "item-view/item-date"})
+            if not date_tag:
+                date_tag = soup.find("span", string=re.compile(r'сегодня|вчера|день|час|мин|\d{1,2}\s+\w+', re.IGNORECASE))
             date_published = date_tag.get_text(strip=True) if date_tag else "Не указана"
 
             return {
@@ -95,9 +123,8 @@ async def parse_avito_ad(url: str) -> dict:
         except Exception as e:
             return {"error": f"Ошибка парсинга: {str(e)}"}
 
-# ================== ПОИСК ПОХОЖИХ НА АВИТО ==================
+# ================== ПОИСК ПОХОЖИХ ==================
 async def search_similar_avito(title: str) -> dict:
-    """Ищет похожие товары на Авито и собирает цены"""
     ua = UserAgent()
     headers = {
         "User-Agent": ua.random,
@@ -105,10 +132,19 @@ async def search_similar_avito(title: str) -> dict:
         "Accept-Language": "ru-RU,ru;q=0.8",
     }
 
-    short_query = " ".join(title.split()[:5])
+    # Берём 3-5 ключевых слов без спецсимволов
+    clean_title = re.sub(r'[^\w\s]', '', title)
+    words = clean_title.split()
+    # Убираем короткие слова и мусор
+    keywords = [w for w in words if len(w) > 2 and w.lower() not in ['sim', 'esim', 'гб', 'гб,', 'pro', 'max', 'для', 'для', 'для']]
+    if not keywords:
+        keywords = words[:3]
+    short_query = " ".join(keywords[:4])
+    
     search_url = f"https://www.avito.ru/all?q={short_query}"
+    logger.info(f"Ищем на Авито: {short_query}")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         try:
             resp = await client.get(search_url, headers=headers, timeout=15)
 
@@ -116,8 +152,11 @@ async def search_similar_avito(title: str) -> dict:
                 return {"error": f"Авито ответил {resp.status_code}", "prices": [], "avg": 0, "median": 0, "count": 0}
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            price_items = soup.find_all("meta", itemprop="price")
+            
             prices = []
+            
+            # Способ 1: meta itemprop="price"
+            price_items = soup.find_all("meta", itemprop="price")
             for item in price_items:
                 content = item.get("content")
                 if content:
@@ -128,33 +167,50 @@ async def search_similar_avito(title: str) -> dict:
                     except:
                         continue
 
+            # Способ 2: span с data-marker="item-price"
+            if not prices:
+                price_blocks = soup.find_all("span", {"data-marker": re.compile(r"item-price")})
+                for block in price_blocks:
+                    text = block.get_text(strip=True)
+                    nums = re.findall(r'[\d\s]+', text)
+                    if nums:
+                        num = nums[0].replace(" ", "").replace("\xa0", "")
+                        try:
+                            p = float(num)
+                            if 100 < p < 50_000_000:
+                                prices.append(p)
+                        except:
+                            continue
+
+            # Способ 3: любые span с ценой
             if not prices:
                 price_blocks = soup.find_all("span", class_=re.compile(r".*price.*"))
                 for block in price_blocks:
                     text = block.get_text(strip=True)
-                    numbers = re.findall(r'[\d\s]+', text)
-                    if numbers:
-                        num = numbers[0].replace(" ", "").replace("\xa0", "")
+                    nums = re.findall(r'[\d\s]+', text)
+                    if nums:
+                        num = nums[0].replace(" ", "").replace("\xa0", "")
                         try:
                             p = float(num)
-                            if 100 < p < 10_000_000:
+                            if 100 < p < 50_000_000:
                                 prices.append(p)
                         except:
                             continue
 
             if not prices:
-                return {"error": "Не удалось найти похожие товары", "prices": [], "avg": 0, "median": 0, "count": 0}
+                return {"error": "Не удалось найти похожие товары на Авито", "prices": [], "avg": 0, "median": 0, "count": 0}
 
-            avg = sum(prices) / len(prices)
+            # Фильтруем выбросы
             sorted_prices = sorted(prices)
             median = sorted_prices[len(sorted_prices) // 2]
-
-            # Убираем выбросы: цены, сильно отличающиеся от медианы
             filtered = [p for p in prices if 0.3 * median < p < 3 * median]
+            
             if filtered:
                 sorted_filtered = sorted(filtered)
                 avg = sum(filtered) / len(filtered)
                 median = sorted_filtered[len(sorted_filtered) // 2]
+            else:
+                avg = sum(prices) / len(prices)
 
             return {
                 "prices": sorted(prices)[:10],
@@ -165,9 +221,8 @@ async def search_similar_avito(title: str) -> dict:
         except Exception as e:
             return {"error": f"Ошибка поиска: {str(e)}", "prices": [], "avg": 0, "median": 0, "count": 0}
 
-# ================== АНАЛИЗ ВЫГОДНОСТИ ==================
+# ================== АНАЛИЗ ==================
 def analyze_profit(ad_data: dict, market_data: dict) -> str:
-    """Анализирует выгодность перепродажи"""
     if "error" in ad_data:
         return f"❌ Ошибка объявления: {ad_data['error']}"
 
@@ -175,7 +230,8 @@ def analyze_profit(ad_data: dict, market_data: dict) -> str:
         return (
             f"📦 *{ad_data.get('title', 'Товар')}*\n"
             f"💰 Цена в объявлении: *{int(ad_data.get('price', 0)):,} ₽*\n"
-            f"📍 {ad_data.get('city', '?')} | 👁 {ad_data.get('views', '?')} просмотров\n\n"
+            f"📍 {ad_data.get('city', 'Не указан')} | 👁 {ad_data.get('views', 0)} просмотров\n"
+            f"🗓 {ad_data.get('date', 'Не указана')}\n\n"
             f"⚠️ Не удалось найти похожие: {market_data.get('error', '')}"
         )
 
@@ -183,11 +239,13 @@ def analyze_profit(ad_data: dict, market_data: dict) -> str:
     avg_market = market_data.get("median", market_data.get("avg", 0))
     count = market_data.get("count", 0)
 
+    if price_ad == 0 or avg_market == 0:
+        return f"📦 *{ad_data.get('title', 'Товар')}*\n💰 Цена: {int(price_ad):,} ₽\n\n⚠️ Недостаточно данных для анализа"
+
     profit = avg_market - price_ad
     roi = (profit / price_ad * 100) if price_ad > 0 else 0
     discount = ((avg_market - price_ad) / avg_market * 100) if avg_market > 0 else 0
 
-    # Вердикт
     if roi > 50 and count < 15:
         verdict = "🔥 ОГОНЬ! Срочно бери и перепродавай!"
         emoji = "🟢"
@@ -195,22 +253,21 @@ def analyze_profit(ad_data: dict, market_data: dict) -> str:
         verdict = "👍 Отличный вариант для перепродажи"
         emoji = "🟢"
     elif roi > 15:
-        verdict = "🤔 Норм, можно взять, но маржа небольшая"
+        verdict = "🤔 Норм, можно взять"
         emoji = "🟡"
     elif roi > 0:
-        verdict = "😐 Почти без прибыли. Поищи дешевле"
+        verdict = "😐 Почти без прибыли"
         emoji = "🟠"
     else:
         verdict = "👎 Дороже рынка. Невыгодно"
         emoji = "🔴"
 
-    # Конкуренция
     if count <= 5:
         competition = "🏆 Низкая (дефицит!)"
     elif count <= 20:
         competition = "📊 Средняя"
     else:
-        competition = "📉 Высокая (много продавцов)"
+        competition = "📉 Высокая"
 
     return (
         f"{emoji} *Анализ объявления*\n\n"
@@ -234,13 +291,10 @@ async def cmd_start(message: Message):
     await message.answer(
         "🚀 *ProfitRessel — Оценщик выгоды на Авито*\n\n"
         "📎 *Как пользоваться:*\n"
-        "Отправь мне ссылку на любое объявление Авито, и я проанализирую:\n"
+        "Отправь мне ссылку на объявление Авито — я проанализирую:\n"
         "• Реальную рыночную цену\n"
-        "• Потенциальную прибыль при перепродаже\n"
-        "• Уровень конкуренции\n"
-        "• Выгодно ли брать\n\n"
-        "📝 *Пример:*\n"
-        "`https://www.avito.ru/moskva/tovary_dlya_kompyutera/igrovaya_mysh_123456789`\n\n"
+        "• Потенциальную прибыль\n"
+        "• Уровень конкуренции\n\n"
         "_Отправляй ссылку!_",
         parse_mode="Markdown"
     )
@@ -249,30 +303,20 @@ async def cmd_start(message: Message):
 async def handle_message(message: Message):
     text = message.text.strip() if message.text else ""
 
-    # Проверяем, что это ссылка на Авито
     if "avito.ru" not in text:
-        await message.reply(
-            "❌ Пришли ссылку на объявление Авито!\n\n"
-            "📝 Пример:\n"
-            "`https://www.avito.ru/moskva/...`",
-            parse_mode="Markdown"
-        )
+        await message.reply("❌ Пришли ссылку на объявление Авито!")
         return
 
-    wait_msg = await message.reply("🔍 *Анализирую объявление...*", parse_mode="Markdown")
+    wait_msg = await message.reply("🔍 *Анализирую...*", parse_mode="Markdown")
 
     try:
-        # 1. Парсим объявление
         ad_data = await parse_avito_ad(text)
 
         if "error" in ad_data:
             await wait_msg.edit_text(f"❌ {ad_data['error']}")
             return
 
-        # 2. Ищем похожие на рынке
         market_data = await search_similar_avito(ad_data.get("title", ""))
-
-        # 3. Анализируем
         result = analyze_profit(ad_data, market_data)
 
         await wait_msg.edit_text(result, parse_mode="Markdown")
