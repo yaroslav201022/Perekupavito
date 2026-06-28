@@ -1,18 +1,4 @@
-import asyncio
-import logging
-import re
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message
-import httpx
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-
-# ================== ТОКЕН ==================
-BOT_TOKEN = "8879391155:AAFy2q-8kMCxfEnl_1D6I1AqP5Ug9VfP73w"
-
-# ================== ЛОГИ ==================
-logging.basicConfig(level=logging.INFO)
+(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ================== ИНИЦИАЛИЗАЦИЯ ==================
